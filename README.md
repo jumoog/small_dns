@@ -1,8 +1,10 @@
 # smalldns
 
-A small authoritative-ish DNS server for a home network: it answers the A/AAAA
-records you configure and forwards everything else to an upstream resolver.
-Records are managed from a web UI and stored in a JSON file.
+A small authoritative-ish DNS server for a home network or a tailnet: it
+answers the A/AAAA records you configure and forwards everything else to an
+upstream resolver. Records are managed from a web UI and stored in a JSON
+file. Handy as a Tailscale split-DNS resolver, so a public server’s names
+resolve to its tailnet address from inside the tailnet — see below.
 
 No dependencies — standard library only, including the DNS wire format.
 
@@ -60,6 +62,36 @@ docker run ... ghcr.io/jumoog/small_dns:latest \
 ```
 
 Build it yourself with `docker build -t smalldns .`.
+
+## Tailscale split DNS
+
+The case this was written for: one server that is public *and* runs services
+only meant for the tailnet. Public DNS resolves `example.io` to the machine's
+public address, but from inside the tailnet you want the same names to land on
+its `100.x` address — so internal traffic never leaves the tailnet and the
+services can stay bound to the Tailscale interface.
+
+Run smalldns on a tailnet node, bound to that node's tailnet address:
+
+```bash
+smalldns -dns 100.101.102.103:53 -http 100.101.102.103:8080
+```
+
+Add the names that should resolve internally, e.g. `*.example.io` →
+`100.101.102.103`, then in the Tailscale admin console under **DNS →
+Nameservers** add a custom nameserver pointing at `100.101.102.103`, tick
+**Restrict to domain** and enter `example.io`.
+
+Every tailnet device now sends `example.io` queries to smalldns and everything
+else to its usual resolver. Because smalldns forwards names it does not know,
+you only need records for the ones you actually want overridden — the rest of
+the domain still resolves to its public answers. Devices off the tailnet are
+untouched and keep getting the public addresses.
+
+Two things worth knowing: split DNS sends queries to port 53 on the tailnet
+address, so the process needs to bind a low port (see above), and the web UI
+has no authentication — binding `-http` to the tailnet address keeps it off
+the public interface, and a tailnet ACL can narrow it further.
 
 ## Records
 
