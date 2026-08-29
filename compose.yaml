@@ -1,0 +1,44 @@
+services:
+  tailscale:
+    hostname: pihole                          # keep the tailnet name so clients need no reconfiguration
+    image: tailscale/tailscale
+    volumes:
+      - tailscale:/var/lib/tailscale          # State data will be stored in this directory
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:                                  # Required for tailscale to work
+      - net_admin
+      - sys_module
+    # smalldns runs as an unprivileged user inside this network namespace, so
+    # the namespace owner has to allow it to bind port 53. Alternative: drop
+    # this and give the smalldns service `user: "0:0"`.
+    sysctls:
+      net.ipv4.ip_unprivileged_port_start: 0
+    command: tailscaled
+    restart: unless-stopped
+    # Deliberately not watchtower-managed: smalldns lives in this container's
+    # network namespace, and recreating it would leave smalldns running with a
+    # namespace that no longer exists. Update tailscale by hand with
+    # `docker compose pull tailscale && docker compose up -d`, which recreates
+    # the dependent too.
+
+  smalldns:
+    network_mode: service:tailscale
+    image: ghcr.io/jumoog/small_dns:latest
+    # Flags replace the image's default command as a whole, so all of them are
+    # listed here. The web UI has no authentication; it is reachable only from
+    # the tailnet, on port 8080 of this node.
+    command:
+      - -dns=:53
+      - -http=:8080
+      - -records=/data/records.json
+      - -upstream=1.1.1.1:53
+    volumes:
+      - smalldns-data:/data
+    restart: unless-stopped
+    labels:
+      com.centurylinklabs.watchtower.enable: "true"
+
+volumes:
+  tailscale:
+  smalldns-data:

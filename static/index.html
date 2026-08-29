@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>smalldns</title>
+<style>
+  :root {
+    --bg: #1b2028;
+    --panel: #232a35;
+    --row: #262e3a;
+    --row-alt: #222935;
+    --head: #1f2530;
+    --line: #313b49;
+    --text: #d7dde6;
+    --muted: #8a94a3;
+    --accent: #e8452c;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 32px 16px;
+    background: var(--bg);
+    color: var(--text);
+    font: 14px/1.5 "Segoe UI", system-ui, sans-serif;
+  }
+  main { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+  p.sub { margin: 0 0 20px; color: var(--muted); }
+  form {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+  input {
+    flex: 1 1 200px;
+    min-width: 0;
+    padding: 9px 12px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    color: var(--text);
+    font: inherit;
+  }
+  input:focus { outline: none; border-color: var(--accent); }
+  button {
+    font: inherit;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+  }
+  button.add {
+    padding: 9px 18px;
+    background: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  button.add:hover { filter: brightness(1.1); }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow-x: auto;
+  }
+  table { width: 100%; border-collapse: collapse; }
+  th, td {
+    text-align: left;
+    padding: 12px 16px;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  th {
+    background: var(--head);
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+  }
+  th span.arrow { float: right; color: var(--muted); font-size: 11px; }
+  th[aria-sort="ascending"] span.arrow,
+  th[aria-sort="descending"] span.arrow { color: var(--text); }
+  th.actions, td.actions { width: 56px; cursor: default; }
+  tbody tr:nth-child(odd) { background: var(--row); }
+  tbody tr:nth-child(even) { background: var(--row-alt); }
+  tbody tr:last-child td { border-bottom: none; }
+  button.del {
+    padding: 5px 9px;
+    background: var(--accent);
+    color: #fff;
+    line-height: 1;
+  }
+  button.del:hover { filter: brightness(1.1); }
+  .empty, .error {
+    padding: 16px;
+    color: var(--muted);
+  }
+  .error { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>smalldns</h1>
+  <p class="sub">Local DNS records. Everything else is forwarded upstream.</p>
+
+  <form id="add">
+    <input id="domain" placeholder="host.example.com or *.example.com" autocomplete="off" required>
+    <input id="ip" placeholder="192.168.1.10" autocomplete="off" required>
+    <button class="add" type="submit">Add</button>
+  </form>
+  <div id="error" class="error" hidden></div>
+
+  <div class="panel">
+    <table>
+      <thead>
+        <tr>
+          <th data-key="domain" aria-sort="ascending">Domain <span class="arrow">▼</span></th>
+          <th data-key="ip">IP <span class="arrow">⇅</span></th>
+          <th class="actions"></th>
+        </tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div id="empty" class="empty" hidden>No records yet.</div>
+  </div>
+</main>
+
+<script>
+const rows = document.getElementById("rows");
+const empty = document.getElementById("empty");
+const errorBox = document.getElementById("error");
+let records = [];
+let sort = { key: "domain", asc: true };
+
+function showError(message) {
+  errorBox.textContent = message;
+  errorBox.hidden = !message;
+}
+
+// api calls the record endpoints and refreshes the table from the response.
+async function api(path, options) {
+  const res = await fetch(path, options);
+  const body = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(body && body.error ? body.error : res.statusText);
+  return body;
+}
+
+function compare(a, b) {
+  return String(a[sort.key]).localeCompare(String(b[sort.key]), undefined, { numeric: true });
+}
+
+function render() {
+  const sorted = [...records].sort((a, b) => (sort.asc ? compare(a, b) : compare(b, a)));
+  rows.replaceChildren(...sorted.map(rec => {
+    const tr = document.createElement("tr");
+    const domain = document.createElement("td");
+    domain.textContent = rec.domain;
+    const ip = document.createElement("td");
+    ip.textContent = rec.ip;
+    const actions = document.createElement("td");
+    actions.className = "actions";
+    const del = document.createElement("button");
+    del.className = "del";
+    del.type = "button";
+    del.textContent = "🗑";
+    del.title = "Delete " + rec.domain;
+    del.addEventListener("click", () => remove(rec.domain));
+    actions.append(del);
+    tr.append(domain, ip, actions);
+    return tr;
+  }));
+  empty.hidden = records.length > 0;
+
+  for (const th of document.querySelectorAll("th[data-key]")) {
+    const active = th.dataset.key === sort.key;
+    th.setAttribute("aria-sort", active ? (sort.asc ? "ascending" : "descending") : "none");
+    th.querySelector(".arrow").textContent = active ? (sort.asc ? "▼" : "▲") : "⇅";
+  }
+}
+
+async function load() {
+  try {
+    records = await api("/api/records");
+    showError("");
+  } catch (err) {
+    showError(err.message);
+  }
+  render();
+}
+
+async function remove(domain) {
+  try {
+    records = await api("/api/records/" + encodeURIComponent(domain), { method: "DELETE" });
+    showError("");
+    render();
+  } catch (err) {
+    showError(err.message);
+  }
+}
+
+document.getElementById("add").addEventListener("submit", async event => {
+  event.preventDefault();
+  const domain = document.getElementById("domain");
+  const ip = document.getElementById("ip");
+  try {
+    records = await api("/api/records", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ domain: domain.value, ip: ip.value }),
+    });
+    domain.value = "";
+    ip.value = "";
+    domain.focus();
+    showError("");
+    render();
+  } catch (err) {
+    showError(err.message);
+  }
+});
+
+for (const th of document.querySelectorAll("th[data-key]")) {
+  th.addEventListener("click", () => {
+    const key = th.dataset.key;
+    sort = { key, asc: sort.key === key ? !sort.asc : true };
+    render();
+  });
+}
+
+load();
+</script>
+</body>
+</html>
