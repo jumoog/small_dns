@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -273,6 +274,26 @@ func TestSetRollsBackWhenSaveFails(t *testing.T) {
 	}
 	if _, ok := s.lookup("home.jumoog.io"); ok {
 		t.Error("record must not resolve after its save failed")
+	}
+}
+
+// TestExcludedNameIsForwarded is the end-to-end half of the exclusion rules:
+// a name excluded from a wildcard has to reach the upstream resolver instead of
+// being answered from the wildcard's address.
+func TestExcludedNameIsForwarded(t *testing.T) {
+	upstream, _ := stubUpstream(t, 1)
+	store := testStore(t, map[string]string{"*.jumoog.io": "10.0.0.1", "!vpn.jumoog.io": ""})
+	s := &dnsServer{store: store, upstream: upstream, ttl: 60, timeout: 2 * time.Second}
+
+	resp := s.handle(buildQuery(t, "vpn.jumoog.io", typeA), false)
+	if flags := binary.BigEndian.Uint16(resp[2:4]); flags&0x000F != rcodeNoError {
+		t.Fatalf("flags = %#x, want NOERROR from upstream", flags)
+	}
+	if !bytes.Contains(resp, []byte{93, 184, 216, 34}) {
+		t.Error("excluded name was not answered by the upstream resolver")
+	}
+	if bytes.Contains(resp, []byte{10, 0, 0, 1}) {
+		t.Error("excluded name was answered from the wildcard record")
 	}
 }
 

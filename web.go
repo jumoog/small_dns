@@ -67,7 +67,11 @@ func (w *webServer) addRecord(rw http.ResponseWriter, r *http.Request) {
 		writeStoreError(rw, err)
 		return
 	}
-	log.Printf("web: set %s -> %s", normalize(in.Domain), strings.TrimSpace(in.IP))
+	if ip := strings.TrimSpace(in.IP); ip == "" {
+		log.Printf("web: excluded %s", normalize(in.Domain))
+	} else {
+		log.Printf("web: set %s -> %s", normalize(in.Domain), ip)
+	}
 	writeJSON(rw, http.StatusOK, w.store.list())
 }
 

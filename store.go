@@ -34,7 +34,9 @@ func invalid(format string, args ...any) error {
 
 // store keeps the records in memory and mirrors them to a JSON file. Exact
 // names and wildcards ("*.example.com", matching one or more leading labels)
-// are supported; the most specific match wins.
+// are supported, as are exclusions ("!vpn.example.com", "!*.dev.example.com")
+// that carve a name back out of a wildcard and let it be forwarded upstream
+// again. The most specific match wins.
 type store struct {
 	mu    sync.RWMutex
 	path  string
@@ -76,11 +78,13 @@ func normalize(domain string) string {
 	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
 }
 
-// parseRecord validates one domain/IP pair. Domains are checked here rather
-// than at query time so a name that cannot go on the wire — or cannot be
-// addressed through /api/records/{domain} — never enters the store.
+// parseRecord validates one domain/IP pair and returns the name without its
+// "!" marker. Domains are checked here rather than at query time so a name that
+// cannot go on the wire — or cannot be addressed through /api/records/{domain}
+// — never enters the store. An exclusion carries no address: it is stored as an
+// invalid one, which lookup reports as "not ours" so the query is forwarded.
 func parseRecord(domain, ip string) (string, netip.Addr, error) {
-	name := normalize(domain)
+	name, excluded := strings.CutPrefix(normalize(domain), "!")
 	if name == "" {
 		return "", netip.Addr{}, invalid("domain must not be empty")
 	}
@@ -102,6 +106,13 @@ func parseRecord(domain, ip string) (string, netip.Addr, error) {
 				return "", netip.Addr{}, invalid("%q is not a valid domain", name)
 			}
 		}
+	}
+
+	if excluded {
+		if strings.TrimSpace(ip) != "" {
+			return "", netip.Addr{}, invalid("an exclusion has no IP address")
+		}
+		return name, netip.Addr{}, nil
 	}
 
 	addr, err := netip.ParseAddr(strings.TrimSpace(ip))
@@ -147,13 +158,17 @@ func (s *store) set(domain, ip string) error {
 // delete removes a record, reporting whether there was one. Like set, the file
 // is rewritten under the lock and the change is undone if that fails.
 func (s *store) delete(domain string) (bool, error) {
-	name := normalize(domain)
+	// An exclusion is stored under the name it excludes, so the "!" has to be
+	// part of what is matched: a delete aimed at an exclusion must not remove a
+	// record that has taken over that name since the caller last listed them,
+	// and the other way round.
+	name, excluded := strings.CutPrefix(normalize(domain), "!")
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	key, table := s.tableFor(name)
 	previous, existed := table[key]
-	if !existed {
+	if !existed || previous.IsValid() == excluded {
 		return false, nil
 	}
 	delete(table, key)
@@ -165,12 +180,14 @@ func (s *store) delete(domain string) (bool, error) {
 }
 
 // lookup resolves name, preferring an exact record and otherwise walking up the
-// labels to find the longest matching wildcard.
+// labels to find the longest matching wildcard. The first entry that matches
+// decides the answer even when it is an exclusion, so an excluded name is
+// forwarded rather than falling through to a broader wildcard.
 func (s *store) lookup(name string) (netip.Addr, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if addr, ok := s.exact[name]; ok {
-		return addr, true
+		return addr, addr.IsValid()
 	}
 	for rest := name; rest != ""; {
 		_, after, found := strings.Cut(rest, ".")
@@ -178,7 +195,7 @@ func (s *store) lookup(name string) (netip.Addr, bool) {
 			break
 		}
 		if addr, ok := s.wild[after]; ok {
-			return addr, true
+			return addr, addr.IsValid()
 		}
 		rest = after
 	}
@@ -195,13 +212,22 @@ func (s *store) list() []record {
 func (s *store) listLocked() []record {
 	records := make([]record, 0, len(s.exact)+len(s.wild))
 	for name, addr := range s.exact {
-		records = append(records, record{Domain: name, IP: addr.String()})
+		records = append(records, newRecord(name, addr))
 	}
 	for suffix, addr := range s.wild {
-		records = append(records, record{Domain: "*." + suffix, IP: addr.String()})
+		records = append(records, newRecord("*."+suffix, addr))
 	}
 	sort.Slice(records, func(i, j int) bool { return records[i].Domain < records[j].Domain })
 	return records
+}
+
+// newRecord spells out one stored entry the way the file and the UI show it:
+// an exclusion is the domain with a "!" in front and no IP.
+func newRecord(domain string, addr netip.Addr) record {
+	if !addr.IsValid() {
+		return record{Domain: "!" + domain}
+	}
+	return record{Domain: domain, IP: addr.String()}
 }
 
 // saveLocked writes the records atomically so a crash mid-write cannot truncate

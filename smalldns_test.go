@@ -102,6 +102,89 @@ func TestStoreLookup(t *testing.T) {
 	}
 }
 
+// TestStoreExclusions covers names carved back out of a wildcard: they must
+// report "not ours" so the query is forwarded, and they must beat any wildcard
+// they sit under.
+func TestStoreExclusions(t *testing.T) {
+	s := testStore(t, map[string]string{
+		"*.jumoog.io":        "10.0.0.1",
+		"*.dev.jumoog.io":    "10.0.0.2",
+		"!vpn.jumoog.io":     "",
+		"!*.git.jumoog.io":   "",
+		"!api.dev.jumoog.io": "",
+	})
+
+	for _, name := range []string{
+		"vpn.jumoog.io",         // exact exclusion under a wildcard
+		"VPN.jumoog.io",         // still excluded case-insensitively
+		"one.git.jumoog.io",     // wildcard exclusion of a whole subtree
+		"two.one.git.jumoog.io", // and of everything below it
+		"api.dev.jumoog.io",     // excluded from the more specific wildcard
+	} {
+		if addr, ok := s.lookup(normalize(name)); ok {
+			t.Errorf("lookup(%q) = %v, want forwarded upstream", name, addr)
+		}
+	}
+	for _, tc := range []struct{ name, want string }{
+		{"other.jumoog.io", "10.0.0.1"},
+		{"git.jumoog.io", "10.0.0.1"}, // the suffix itself is not excluded
+		{"web.dev.jumoog.io", "10.0.0.2"},
+	} {
+		addr, ok := s.lookup(normalize(tc.name))
+		if !ok || addr.String() != tc.want {
+			t.Errorf("lookup(%q) = %v/%v, want %s", tc.name, addr, ok, tc.want)
+		}
+	}
+
+	if err := s.set("!vpn.jumoog.io", "10.0.0.3"); err == nil {
+		t.Error("an exclusion with an IP should be rejected")
+	}
+	if err := s.set("vpn.jumoog.io", "10.0.0.3"); err != nil {
+		t.Fatalf("set over an exclusion: %v", err)
+	}
+	if addr, ok := s.lookup("vpn.jumoog.io"); !ok || addr.String() != "10.0.0.3" {
+		t.Errorf("a record should replace the exclusion of the same name: %v/%v", addr, ok)
+	}
+	// A caller working from a stale listing must not delete the record that
+	// took the exclusion's place.
+	if deleted, err := s.delete("!vpn.jumoog.io"); deleted || err != nil {
+		t.Errorf("deleting the exclusion should not remove the record now under that name: %v/%v", deleted, err)
+	}
+	if addr, ok := s.lookup("vpn.jumoog.io"); !ok || addr.String() != "10.0.0.3" {
+		t.Errorf("the record should still be there: %v/%v", addr, ok)
+	}
+}
+
+// TestStoreExclusionsPersist checks how an exclusion is written down and that
+// it survives the round trip through the file.
+func TestStoreExclusionsPersist(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "records.json")
+	s, err := newStore(path)
+	if err != nil {
+		t.Fatalf("newStore: %v", err)
+	}
+	if err := s.set("!vpn.jumoog.io", ""); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	if got := s.list(); len(got) != 1 || got[0].Domain != "!vpn.jumoog.io" || got[0].IP != "" {
+		t.Fatalf("list = %+v, want the domain marked with ! and no IP", got)
+	}
+
+	reloaded, err := newStore(path)
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, ok := reloaded.lookup("vpn.jumoog.io"); ok {
+		t.Error("the exclusion should still be an exclusion after a reload")
+	}
+	if deleted, err := reloaded.delete("vpn.jumoog.io"); deleted || err != nil {
+		t.Errorf("the name alone must not delete the exclusion listed as !vpn.jumoog.io: %v/%v", deleted, err)
+	}
+	if deleted, err := reloaded.delete("!vpn.jumoog.io"); !deleted || err != nil {
+		t.Errorf("an exclusion should be deletable as it is listed: %v/%v", deleted, err)
+	}
+}
+
 func TestStoreSetRejectsBadInput(t *testing.T) {
 	s := testStore(t, nil)
 	if err := s.set("", "1.2.3.4"); err == nil {

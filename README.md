@@ -78,9 +78,10 @@ smalldns -dns 100.101.102.103:53 -http 100.101.102.103:8080
 ```
 
 Add the names that should resolve internally, e.g. `*.example.io` →
-`100.101.102.103`, then in the Tailscale admin console under **DNS →
-Nameservers** add a custom nameserver pointing at `100.101.102.103`, tick
-**Restrict to domain** and enter `example.io`.
+`100.101.102.103`. If a few names under that wildcard should keep their public
+answers, add them as exclusions (`!mail.example.io`). Then, in the Tailscale
+admin console under **DNS → Nameservers**, add a custom nameserver pointing at
+`100.101.102.103`, tick **Restrict to domain** and enter `example.io`.
 
 Every tailnet device now sends `example.io` queries to smalldns and everything
 else to its usual resolver. Because smalldns forwards names it does not know,
@@ -97,6 +98,10 @@ the public interface, and a tailnet ACL can narrow it further.
 
 * Exact names: `home.example.io`
 * Wildcards: `*.example.io` matches any name under that suffix
+* Exclusions: `!vpn.example.io` (or `!*.git.example.io` for a whole subtree)
+  takes a name back out of a wildcard, so it is forwarded upstream again. An
+  exclusion has no IP — send `{"domain":"!vpn.example.io","ip":""}`, or leave
+  the IP field of the web UI empty
 * Both IPv4 (served as `A`) and IPv6 (served as `AAAA`)
 
 Domains are validated on the way in — letters, digits, `-` and `_`, labels of
@@ -106,7 +111,12 @@ has been written to disk; if that write fails the change is rolled back rather
 than living on until the next restart.
 
 An exact record beats a wildcard, and the longest matching wildcard wins, so
-`*.dev.example.io` takes precedence over `*.example.io`. Names are matched
+`*.dev.example.io` takes precedence over `*.example.io`. An exclusion is
+matched the same way — the most specific entry decides — so `!vpn.example.io`
+beats `*.example.io`, and `!*.git.example.io` beats it for every name under
+`git.example.io`. An exclusion is deleted under the name it is listed with,
+`!` included, so a stale listing cannot delete the record that has since taken
+that name. Names are matched
 case-insensitively. Asking for the family a record does not have (an `AAAA`
 query for an IPv4 record) returns `NOERROR` with no answers, which is what a
 name that exists without an address of that type is supposed to return.
@@ -125,7 +135,8 @@ There is no authentication — bind `-http` to a trusted interface.
 
 1. Parse the question. Malformed messages get `FORMERR`.
 2. `A`/`AAAA` questions in class `IN` that match a record are answered locally
-   with `AA` set.
+   with `AA` set. A question whose most specific match is an exclusion counts
+   as unconfigured and goes upstream.
 3. Everything else is forwarded to `-upstream` verbatim and the upstream
    response is returned unchanged, so record types this server does not model
    still work. A failed forward becomes `SERVFAIL`.

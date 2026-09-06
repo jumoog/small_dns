@@ -44,6 +44,7 @@
     font: inherit;
   }
   input:focus { outline: none; border-color: var(--accent); }
+  input:disabled { color: var(--muted); cursor: not-allowed; }
   button {
     font: inherit;
     border: none;
@@ -95,15 +96,17 @@
     color: var(--muted);
   }
   .error { color: var(--accent); }
+  td.muted { color: var(--muted); font-style: italic; }
 </style>
 </head>
 <body>
 <main>
   <h1>smalldns</h1>
-  <p class="sub">Local DNS records. Everything else is forwarded upstream.</p>
+  <p class="sub">Local DNS records. Everything else is forwarded upstream.
+    Prefix a name with <code>!</code> to exclude it from a wildcard.</p>
 
   <form id="add">
-    <input id="domain" placeholder="host.example.com or *.example.com" autocomplete="off" required>
+    <input id="domain" placeholder="host.example.com, *.example.com or !vpn.example.com" autocomplete="off" required>
     <input id="ip" placeholder="192.168.1.10" autocomplete="off" required>
     <button class="add" type="submit">Add</button>
   </form>
@@ -126,6 +129,8 @@
 
 <script>
 const rows = document.getElementById("rows");
+const domainInput = document.getElementById("domain");
+const ipInput = document.getElementById("ip");
 const empty = document.getElementById("empty");
 const errorBox = document.getElementById("error");
 let records = [];
@@ -155,7 +160,12 @@ function render() {
     const domain = document.createElement("td");
     domain.textContent = rec.domain;
     const ip = document.createElement("td");
-    ip.textContent = rec.ip;
+    if (rec.ip) {
+      ip.textContent = rec.ip;
+    } else {
+      ip.textContent = "forwarded upstream";
+      ip.className = "muted";
+    }
     const actions = document.createElement("td");
     actions.className = "actions";
     const del = document.createElement("button");
@@ -197,19 +207,30 @@ async function remove(domain) {
   }
 }
 
+// An exclusion has no address, so the IP field steps out of the way while a
+// "!" name is being typed.
+function syncIPField() {
+  const excluded = domainInput.value.trim().startsWith("!");
+  ipInput.disabled = excluded;
+  ipInput.required = !excluded;
+  if (excluded) ipInput.value = "";
+}
+
+domainInput.addEventListener("input", syncIPField);
+syncIPField(); // the browser may have restored a "!" name across a reload
+
 document.getElementById("add").addEventListener("submit", async event => {
   event.preventDefault();
-  const domain = document.getElementById("domain");
-  const ip = document.getElementById("ip");
   try {
     records = await api("/api/records", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ domain: domain.value, ip: ip.value }),
+      body: JSON.stringify({ domain: domainInput.value, ip: ipInput.disabled ? "" : ipInput.value }),
     });
-    domain.value = "";
-    ip.value = "";
-    domain.focus();
+    domainInput.value = "";
+    ipInput.value = "";
+    syncIPField();
+    domainInput.focus();
     showError("");
     render();
   } catch (err) {
