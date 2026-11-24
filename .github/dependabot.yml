@@ -1,0 +1,25 @@
+version: 2
+updates:
+  # Actions used by the GHCR publish workflow.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions:
+        patterns: ["*"]
+
+  # Base images in the Dockerfile (golang builder).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+
+  # No module dependencies today; this keeps them covered if one is added.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
