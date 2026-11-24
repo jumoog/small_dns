@@ -375,3 +375,109 @@ func TestConcurrentWritersKeepFileAndMemoryInSync(t *testing.T) {
 		t.Errorf("disk holds %d records, memory holds %d", len(got), len(want))
 	}
 }
+
+// TestOtherQueriesOfLocalNameAreForwarded checks that a configured name only
+// answers the query its record fits: the other address family and every other
+// type reach the upstream resolver instead of an empty local answer.
+func TestOtherQueriesOfLocalNameAreForwarded(t *testing.T) {
+	upstream, _ := stubUpstream(t, 1)
+	store := testStore(t, map[string]string{"home.jumoog.io": "100.110.251.125", "v6.jumoog.io": "2001:db8::1"})
+	s := &dnsServer{store: store, upstream: upstream, ttl: 60, timeout: 2 * time.Second}
+
+	for _, tc := range []struct {
+		name  string
+		qtype uint16
+	}{
+		{"home.jumoog.io", typeAAAA},
+		{"home.jumoog.io", 15}, // MX
+		{"home.jumoog.io", 16}, // TXT
+		{"home.jumoog.io", 65}, // HTTPS
+		{"v6.jumoog.io", typeA},
+	} {
+		resp := s.handle(buildQuery(t, tc.name, tc.qtype), false)
+		if !bytes.Contains(resp, []byte{93, 184, 216, 34}) {
+			t.Errorf("%s type %d: not answered by the upstream resolver", tc.name, tc.qtype)
+		}
+	}
+
+	resp := s.handle(buildQuery(t, "home.jumoog.io", typeA), false)
+	if !bytes.Contains(resp, []byte{100, 110, 251, 125}) {
+		t.Error("A query for an IPv4 record was not answered locally")
+	}
+	resp = s.handle(buildQuery(t, "v6.jumoog.io", typeAAAA), false)
+	v6 := []byte{0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	if !bytes.Contains(resp, v6) {
+		t.Error("AAAA query for an IPv6 record was not answered locally")
+	}
+}
+
+// nxdomainUpstream answers every query with NXDOMAIN, like a public resolver
+// asked about a name that only exists in smalldns.
+func nxdomainUpstream(t *testing.T) string {
+	t.Helper()
+	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	go func() {
+		buf := make([]byte, maxEDNSLen)
+		for {
+			n, client, err := conn.ReadFrom(buf)
+			if err != nil {
+				return
+			}
+			query := buf[:n]
+			q, err := parseQuestion(query)
+			if err != nil {
+				continue
+			}
+			conn.WriteTo(reply(query, q, rcodeNXDomain, nil, 0, edns{}), client)
+		}
+	}()
+	return conn.LocalAddr().String()
+}
+
+// TestHeldNameNeverNXDOMAIN checks that a forwarded query for a name we hold a
+// record for cannot come back NXDOMAIN, which would contradict the local A
+// answer, while names we do not hold still get the upstream NXDOMAIN.
+func TestHeldNameNeverNXDOMAIN(t *testing.T) {
+	store := testStore(t, map[string]string{"*.jumoog.io": "10.0.0.1", "!vpn.jumoog.io": ""})
+	s := &dnsServer{store: store, upstream: nxdomainUpstream(t), ttl: 60, timeout: 2 * time.Second}
+
+	for _, tc := range []struct {
+		name  string
+		qtype uint16
+		want  uint16
+	}{
+		{"dev.jumoog.io", typeAAAA, rcodeNoError},
+		{"dev.jumoog.io", 65, rcodeNoError},
+		{"vpn.jumoog.io", typeAAAA, rcodeNXDomain}, // excluded: not ours
+		{"example.com", typeAAAA, rcodeNXDomain},
+	} {
+		resp := s.handle(buildQuery(t, tc.name, tc.qtype), false)
+		if rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000F; rcode != tc.want {
+			t.Errorf("%s type %d: rcode = %d, want %d", tc.name, tc.qtype, rcode, tc.want)
+		}
+	}
+}
+
+// TestHeldNameSurvivesUpstreamFailure checks that the other family of a local
+// name is answered NOERROR/NODATA, not SERVFAIL, when upstream is unreachable.
+func TestHeldNameSurvivesUpstreamFailure(t *testing.T) {
+	store := testStore(t, map[string]string{"home.jumoog.io": "100.110.251.125"})
+	s := &dnsServer{store: store, upstream: "127.0.0.1:1", ttl: 60, timeout: 200 * time.Millisecond}
+
+	resp := s.handle(buildQuery(t, "home.jumoog.io", typeAAAA), false)
+	if rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000F; rcode != rcodeNoError {
+		t.Errorf("held name: rcode = %d, want NOERROR", rcode)
+	}
+	if got := binary.BigEndian.Uint16(resp[6:8]); got != 0 {
+		t.Errorf("held name: ANCOUNT = %d, want 0", got)
+	}
+
+	resp = s.handle(buildQuery(t, "example.com", typeAAAA), false)
+	if rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000F; rcode != rcodeServFail {
+		t.Errorf("unknown name: rcode = %d, want SERVFAIL", rcode)
+	}
+}

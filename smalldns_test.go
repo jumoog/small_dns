@@ -261,22 +261,6 @@ func TestHandleLocalRecord(t *testing.T) {
 	}
 }
 
-func TestHandleWrongFamilyIsEmptyNoError(t *testing.T) {
-	s := &dnsServer{
-		store:   testStore(t, map[string]string{"home.jumoog.io": "100.110.251.125"}),
-		ttl:     60,
-		timeout: time.Second,
-	}
-	resp := s.handle(buildQuery(t, "home.jumoog.io", typeAAAA), false)
-
-	if rcode := binary.BigEndian.Uint16(resp[2:4]) & 0x000F; rcode != rcodeNoError {
-		t.Errorf("rcode = %d, want NOERROR", rcode)
-	}
-	if got := binary.BigEndian.Uint16(resp[6:8]); got != 0 {
-		t.Errorf("ANCOUNT = %d, want 0", got)
-	}
-}
-
 // TestHandleForwardsUnknownNames points the server at a stub resolver and
 // checks the upstream answer comes back untouched.
 func TestHandleForwardsUnknownNames(t *testing.T) {

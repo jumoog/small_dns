@@ -49,8 +49,19 @@ func (s *dnsServer) handle(query []byte, tcp bool) []byte {
 	}
 	client := parseEDNS(query, q)
 
-	if q.class == classINET && (q.qtype == typeA || q.qtype == typeAAAA) {
-		if addr, ok := s.store.lookup(q.name); ok {
+	// Only the query a record can answer is served locally: an A query for an
+	// IPv4 record, an AAAA query for an IPv6 one. Every other query — other
+	// types, and the other address family of a configured name — is forwarded.
+	//
+	// A forwarded query for a name we hold a record for must still treat that
+	// name as existing: NXDOMAIN from upstream (the name may only exist here)
+	// or an unreachable upstream becomes NOERROR with no data, so the A answer
+	// is never contradicted or held hostage by the internet link.
+	var held bool
+	if q.class == classINET {
+		addr, ok := s.store.lookup(q.name)
+		held = ok
+		if ok && (q.qtype == typeA && addr.Is4() || q.qtype == typeAAAA && addr.Is6()) {
 			return s.localAnswer(query, q, client, addr)
 		}
 	}
@@ -58,7 +69,13 @@ func (s *dnsServer) handle(query []byte, tcp bool) []byte {
 	resp, err := s.forward(query, q, tcp)
 	if err != nil {
 		log.Printf("dns: forwarding %q to %s: %v", q.name, s.upstream, err)
+		if held {
+			return reply(query, q, rcodeNoError, nil, 0, client)
+		}
 		return reply(query, q, rcodeServFail, nil, 0, client)
+	}
+	if held && binary.BigEndian.Uint16(resp[2:4])&0x000F == rcodeNXDomain {
+		return reply(query, q, rcodeNoError, nil, 0, client)
 	}
 	if !tcp && len(resp) > client.udpLimit() {
 		return truncate(query, q, int(binary.BigEndian.Uint16(resp[2:4])&0x000F), client)
@@ -66,14 +83,14 @@ func (s *dnsServer) handle(query []byte, tcp bool) []byte {
 	return resp
 }
 
-// localAnswer serves a stored record. A record of the other family answers
-// NOERROR with no data, which is what a name that exists but has no address of
-// that type is supposed to return.
+// localAnswer serves a stored record. The record type follows the address, not
+// the question, so the rdata length always matches the type it is sent as.
 func (s *dnsServer) localAnswer(query []byte, q question, client edns, addr netip.Addr) []byte {
-	if addr.Is4() != (q.qtype == typeA) {
-		return reply(query, q, rcodeNoError, nil, 0, client)
+	rtype := uint16(typeAAAA)
+	if addr.Is4() {
+		rtype = typeA
 	}
-	rr := answerRecord(q.nameBytes(query), q.qtype, s.ttl, addr.AsSlice())
+	rr := answerRecord(q.nameBytes(query), rtype, s.ttl, addr.AsSlice())
 	return reply(query, q, rcodeNoError, rr, 1, client)
 }
 

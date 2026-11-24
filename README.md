@@ -94,6 +94,14 @@ address, so the process needs to bind a low port (see above), and the web UI
 has no authentication — binding `-http` to the tailnet address keeps it off
 the public interface, and a tailnet ACL can narrow it further.
 
+One more: smalldns only overrides the address family you give it. An `AAAA`
+query for a name with an IPv4 record is forwarded, so if that name has a
+public IPv6 address, dual-stack devices will usually prefer it and their
+traffic leaves the tailnet. A name holds one address, so this cannot be
+avoided with records today — only override names that have no public `AAAA`
+record, or point the name at its tailnet IPv6 address (`fd7a:115c:a1e0::…`)
+instead of the `100.x` one.
+
 ## Records
 
 * Exact names: `home.example.io`
@@ -116,10 +124,16 @@ matched the same way — the most specific entry decides — so `!vpn.example.io
 beats `*.example.io`, and `!*.git.example.io` beats it for every name under
 `git.example.io`. An exclusion is deleted under the name it is listed with,
 `!` included, so a stale listing cannot delete the record that has since taken
-that name. Names are matched
-case-insensitively. Asking for the family a record does not have (an `AAAA`
-query for an IPv4 record) returns `NOERROR` with no answers, which is what a
-name that exists without an address of that type is supposed to return.
+that name. Names are matched case-insensitively.
+
+A record only answers the query it fits: an IPv4 record answers `A`, an IPv6
+record answers `AAAA`. Every other query for that name — the other address
+family, `MX`, `TXT`, `HTTPS` and so on — is forwarded upstream, so an `AAAA`
+query for a name with an IPv4 record gets the public IPv6 address if there is
+one. A name that has a record always exists, though: if upstream says
+`NXDOMAIN` for it (the name may only exist here) or cannot be reached, the
+answer is `NOERROR` with no data instead, so it never contradicts the local
+address.
 
 ## HTTP API
 
@@ -134,12 +148,13 @@ There is no authentication — bind `-http` to a trusted interface.
 ## How queries are handled
 
 1. Parse the question. Malformed messages get `FORMERR`.
-2. `A`/`AAAA` questions in class `IN` that match a record are answered locally
-   with `AA` set. A question whose most specific match is an exclusion counts
-   as unconfigured and goes upstream.
+2. An `A` question in class `IN` that matches an IPv4 record, or an `AAAA`
+   question that matches an IPv6 record, is answered locally with `AA` set. A
+   question whose most specific match is an exclusion counts as unconfigured
+   and goes upstream.
 3. Everything else is forwarded to `-upstream` verbatim and the upstream
-   response is returned unchanged, so record types this server does not model
-   still work. A failed forward becomes `SERVFAIL`.
+   response is returned unchanged, so every query type works. A failed forward
+   becomes `SERVFAIL`.
 4. UDP answers are sized to the client's EDNS0 buffer (512 bytes without one,
    capped at 4096), and anything larger is truncated with `TC` so the client
    retries over TCP; a truncated upstream UDP answer is re-fetched over TCP
