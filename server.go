@@ -40,14 +40,23 @@ func (s *dnsServer) safeHandle(query []byte, tcp bool) (resp []byte) {
 // handle answers a query from the local records, or forwards it upstream.
 // tcp reports whether the caller can carry responses larger than 512 bytes.
 func (s *dnsServer) handle(query []byte, tcp bool) []byte {
+	if len(query) < headerLen {
+		return nil
+	}
+	// Never answer a response (RFC 1035 section 4.1.1). Our own replies would
+	// otherwise count as queries to another server like us, and one spoofed
+	// datagram could keep two of them answering each other indefinitely.
+	if query[2]&0x80 != 0 {
+		return nil
+	}
 	q, err := parseQuestion(query)
 	if err != nil {
-		if len(query) < headerLen {
-			return nil
-		}
 		return reply(query, question{end: headerLen}, rcodeFormErr, nil, 0, edns{})
 	}
 	client := parseEDNS(query, q)
+	if opcode := query[2] >> 3 & 0x0F; opcode != opcodeQuery {
+		return reply(query, q, rcodeNotImp, nil, 0, client)
+	}
 
 	// Only the query a record can answer is served locally: an A query for an
 	// IPv4 record, an AAAA query for an IPv6 one. Every other query — other
@@ -231,12 +240,27 @@ func (s *dnsServer) listenTCP(addr string) error {
 		return err
 	}
 	log.Printf("dns: listening on %s (tcp)", ln.Addr())
+	return s.acceptTCP(ln)
+}
 
+func (s *dnsServer) acceptTCP(ln net.Listener) error {
+	// An Accept error such as running out of file descriptors is temporary,
+	// and returning here would end the whole process (main treats any listener
+	// error as fatal). Back off and keep accepting, as net/http does; only a
+	// closed listener stops the loop.
+	var delay time.Duration
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
-			return err
+			if errors.Is(err, net.ErrClosed) {
+				return err
+			}
+			delay = min(max(2*delay, 5*time.Millisecond), time.Second)
+			log.Printf("dns: accepting tcp: %v; retrying in %v", err, delay)
+			time.Sleep(delay)
+			continue
 		}
+		delay = 0
 		go s.serveTCP(conn)
 	}
 }

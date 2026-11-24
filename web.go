@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"log"
+	"mime"
 	"net/http"
 	"strings"
 )
@@ -26,7 +27,10 @@ func (w *webServer) routes() http.Handler {
 	mux.HandleFunc("GET /api/records", w.listRecords)
 	mux.HandleFunc("POST /api/records", w.addRecord)
 	mux.HandleFunc("DELETE /api/records/{domain}", w.deleteRecord)
-	return mux
+	// The API has no authentication and trusts whoever can reach it, which
+	// includes the browser of anyone on that network. Refuse cross-origin
+	// writes so another web page cannot use that browser to change records.
+	return http.NewCrossOriginProtection().Handler(mux)
 }
 
 func writeJSON(rw http.ResponseWriter, status int, body any) {
@@ -58,6 +62,13 @@ func (w *webServer) listRecords(rw http.ResponseWriter, r *http.Request) {
 }
 
 func (w *webServer) addRecord(rw http.ResponseWriter, r *http.Request) {
+	// A body a browser may send cross-site without a preflight (text/plain,
+	// form encodings) is never a record, even from a client that sends no
+	// Origin or Sec-Fetch-Site header.
+	if mt, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type")); mt != "application/json" {
+		writeError(rw, http.StatusUnsupportedMediaType, "Content-Type must be application/json")
+		return
+	}
 	var in record
 	if err := json.NewDecoder(http.MaxBytesReader(rw, r.Body, 4096)).Decode(&in); err != nil {
 		writeError(rw, http.StatusBadRequest, "invalid JSON body")
@@ -68,9 +79,9 @@ func (w *webServer) addRecord(rw http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ip := strings.TrimSpace(in.IP); ip == "" {
-		log.Printf("web: excluded %s", normalize(in.Domain))
+		log.Printf("web: excluded %q", normalize(in.Domain))
 	} else {
-		log.Printf("web: set %s -> %s", normalize(in.Domain), ip)
+		log.Printf("web: set %q -> %q", normalize(in.Domain), ip)
 	}
 	writeJSON(rw, http.StatusOK, w.store.list())
 }
@@ -86,6 +97,6 @@ func (w *webServer) deleteRecord(rw http.ResponseWriter, r *http.Request) {
 		writeError(rw, http.StatusNotFound, "no such record")
 		return
 	}
-	log.Printf("web: deleted %s", normalize(domain))
+	log.Printf("web: deleted %q", normalize(domain))
 	writeJSON(rw, http.StatusOK, w.store.list())
 }

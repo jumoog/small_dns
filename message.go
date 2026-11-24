@@ -18,10 +18,13 @@ const (
 
 	classINET = 1
 
+	opcodeQuery = 0
+
 	rcodeNoError  = 0
 	rcodeFormErr  = 1
 	rcodeServFail = 2
 	rcodeNXDomain = 3
+	rcodeNotImp   = 4
 
 	headerLen = 12
 	// maxUDPLen is what a client that did not announce EDNS0 can receive;

@@ -62,7 +62,10 @@ func newStore(path string) (*store, error) {
 		return nil, err
 	}
 	for _, r := range records {
-		name, addr, err := parseRecord(r.Domain, r.IP)
+		// Earlier versions accepted an IPv6 zone. Drop it rather than refuse
+		// to start with a file they wrote; the next save leaves it out.
+		ip, _, _ := strings.Cut(r.IP, "%")
+		name, addr, err := parseRecord(r.Domain, ip)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", r.Domain, err)
 		}
@@ -115,8 +118,11 @@ func parseRecord(domain, ip string) (string, netip.Addr, error) {
 		return name, netip.Addr{}, nil
 	}
 
+	// A zone ("fe80::1%eth0") has no meaning in DNS and is dropped on the
+	// wire, so the record would differ from what is served; it is also free
+	// text that would otherwise reach the file and the log unchecked.
 	addr, err := netip.ParseAddr(strings.TrimSpace(ip))
-	if err != nil {
+	if err != nil || addr.Zone() != "" {
 		return "", netip.Addr{}, invalid("invalid IP address")
 	}
 	return name, addr.Unmap(), nil

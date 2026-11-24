@@ -143,7 +143,10 @@ address.
 | `POST` | `/api/records` | `{"domain":"…","ip":"…"}`; adds or replaces, returns the new list |
 | `DELETE` | `/api/records/{domain}` | removes one record, returns the new list |
 
-There is no authentication — bind `-http` to a trusted interface.
+There is no authentication — bind `-http` to a trusted interface. `POST`
+needs `Content-Type: application/json`, and writes sent by a browser on behalf
+of another site are refused with `403`, so a web page cannot use the browser
+of someone on the trusted network to change records.
 
 ## How queries are handled
 
